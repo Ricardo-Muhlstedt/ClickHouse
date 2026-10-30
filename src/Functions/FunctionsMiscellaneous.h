@@ -100,8 +100,9 @@ private:
     SignaturePtr signature;
 };
 
-/// A lambda is expensive if any function in its body is. Nested lambdas are covered by
-/// recursion through their own `FunctionCapture` or `FunctionExpression`.
+/// Nested lambdas are covered by recursion through their own `FunctionCapture` or `FunctionExpression`.
+/// `COLUMN` nodes holding a constant-folded lambda are not checked: expensive functions are not suitable
+/// for constant folding, so a lambda containing one is never folded.
 inline bool isLambdaBodyExpensive(const ExpressionActions & expression_actions)
 {
     for (const auto & inner_node : expression_actions.getActionsDAG().getNodes())
