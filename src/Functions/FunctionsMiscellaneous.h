@@ -100,6 +100,16 @@ private:
     SignaturePtr signature;
 };
 
+/// A lambda is expensive if any function in its body is. Nested lambdas are covered by
+/// recursion through their own `FunctionCapture` or `FunctionExpression`.
+inline bool isLambdaBodyExpensive(const ExpressionActions & expression_actions)
+{
+    for (const auto & inner_node : expression_actions.getActionsDAG().getNodes())
+        if (inner_node.type == ActionsDAG::ActionType::FUNCTION && inner_node.function_base->isExpensive())
+            return true;
+    return false;
+}
+
 /// Executes expression. Uses for lambda functions implementation. Can't be created from factory.
 class FunctionExpression final : public IFunctionBase
 {
@@ -133,6 +143,7 @@ public:
     String getName() const override { return "FunctionExpression"; }
 
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return false; }
+    bool isExpensive() const override { return isLambdaBodyExpensive(*expression_actions); }
 
     const DataTypes & getArgumentTypes() const override { return argument_types; }
     const DataTypePtr & getResultType() const override { return capture->return_type; }
@@ -253,6 +264,7 @@ public:
     String getName() const override { return name; }
 
     bool isSuitableForShortCircuitArgumentsExecution(const DataTypesWithConstInfo & /*arguments*/) const override { return false; }
+    bool isExpensive() const override { return isLambdaBodyExpensive(*expression_actions); }
 
     /// A lambda is suitable for constant folding only if every node in its inner DAG is.
     /// Without this, a higher-order function like arrayMap with a constant array and a lambda

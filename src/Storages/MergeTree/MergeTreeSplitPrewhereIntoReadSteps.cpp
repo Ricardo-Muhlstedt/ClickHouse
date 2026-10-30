@@ -3,6 +3,8 @@
 #include <Columns/ColumnConst.h>
 #include <Storages/ColumnsDescription.h>
 
+#include <unordered_set>
+
 
 namespace DB
 {
@@ -25,6 +27,9 @@ struct NodeInfo
     /// Column names resolved to their physical storage names (subcolumn suffix stripped).
     /// Used for grouping: conditions on subcolumns of the same storage column are placed into one step.
     NameSet required_storage_columns;
+    /// True if computing this node is expensive, so it must not be evaluated on rows that a preceding
+    /// condition rejects.
+    bool expensive = false;
 };
 
 /// Resolves a column name to its storage (physical) name.
@@ -64,7 +69,11 @@ void fillRequiredColumns(
         const auto & child_info = nodes_info[child];
         node_info.required_columns.insert(child_info.required_columns.begin(), child_info.required_columns.end());
         node_info.required_storage_columns.insert(child_info.required_storage_columns.begin(), child_info.required_storage_columns.end());
+        node_info.expensive = node_info.expensive || child_info.expensive;
     }
+
+    if (node->type == ActionsDAG::ActionType::FUNCTION && node->function_base && node->function_base->isExpensive())
+        node_info.expensive = true;
 }
 
 /// Stores information about a node that has already been cloned or added to one of the new DAGs.
@@ -260,17 +269,26 @@ bool tryBuildPrewhereSteps(
     ///
     /// For the WHERE-to-PREWHERE path this is not a problem: `MergeTreeWhereOptimizer` already groups
     /// conditions by their physical storage columns, so subcolumns of the same column arrive here adjacent.
+    ///
+    /// An expensive condition never shares a step with a preceding condition, because all conditions of one
+    /// step are evaluated on the same unfiltered block.
     std::vector<std::vector<const ActionsDAG::Node *>> condition_groups;
+    /// Indices of groups whose first condition is expensive. Steps are not required to materialize their
+    /// filter, so the preceding step is asked to do it, otherwise the expensive condition is evaluated
+    /// on the rows that step rejects.
+    std::unordered_set<size_t> groups_requiring_filtered_input;
     for (const auto & node : condition_nodes)
     {
         const auto & node_info = nodes_info[node];
-        if (!condition_groups.empty()
+        if (!condition_groups.empty() && !node_info.expensive
             && nodes_info[condition_groups.back().front()].required_storage_columns == node_info.required_storage_columns)
         {
             condition_groups.back().push_back(node);
         }
         else
         {
+            if (!condition_groups.empty() && node_info.expensive)
+                groups_requiring_filtered_input.insert(condition_groups.size());
             condition_groups.push_back({node});
         }
     }
@@ -376,7 +394,9 @@ bool tryBuildPrewhereSteps(
                 /// Don't remove if it's in the list of original outputs
                 .remove_filter_column =
                     step.original_node && !all_outputs.contains(step.original_node) && node_to_step[step.original_node] <= step_index,
-                .need_filter = force_short_circuit_execution,
+                /// A step that precedes an expensive condition must materialize its filter, so that
+                /// the expensive condition is not evaluated on the rows this step rejects.
+                .need_filter = force_short_circuit_execution || groups_requiring_filtered_input.contains(step_index + 1),
                 .perform_alter_conversions = true,
                 .columns_overwritten_by_chain = {},
                 .mutation_version = std::nullopt,
